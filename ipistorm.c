@@ -48,21 +48,25 @@ static unsigned int num_cpus;
 static atomic_t running;
 
 static DECLARE_COMPLETION(ipistorm_done);
+DEFINE_MUTEX(safe);
 
 static unsigned int sender[NUM_CPUS];
 static unsigned int receiver[NUM_CPUS];
-
+static unsigned int cpu_map[NUM_CPUS];
 
 static void do_nothing_ipi(void *dummy)
 {
 	receiver[smp_processor_id()]++;
+	mb();
 }
 
 static void print_stats(void)
 {
 	pr_cont("DELTA for cpus(S - R): ");
+	mutex_lock(&safe);
 	for (int i = 0; i < NUM_CPUS; i++)
-		pr_cont( "CPU %d : %8d | ", i, sender[i] - receiver[i]);
+		pr_cont( "CPU %d -> %d : %d || ", i, cpu_map[i], sender[i] - receiver[cpu_map[i]]);
+	mutex_unlock(&safe);
 	pr_cont( "\n");
 }
 
@@ -99,6 +103,7 @@ static int ipistorm_thread(void *data)
 	}
 
 	pr_info("%lu -> %lu\n", mycpu, target_cpu);
+	cpu_map[mycpu] = target_cpu;
 
 	if (single && !cpu_online(target_cpu)) {
 		pr_err("CPU %lu not online\n", target_cpu);
@@ -108,7 +113,10 @@ static int ipistorm_thread(void *data)
 	jiffies_start = jiffies;
 
 	while (jiffies < (jiffies_start + timeout*HZ)) {
-		sender[smp_processor_id()]++;
+                mutex_lock(&safe);
+                sender[smp_processor_id()]++;
+                mb();
+                mutex_unlock(&safe);
 		if (single)
 			smp_call_function_single(target_cpu,
 						 do_nothing_ipi, NULL, wait);
@@ -133,6 +141,7 @@ static int __init ipistorm_init(void)
 	unsigned long cpu;
 	cpumask_var_t mask;
 	int ret = 0;
+        mutex_init(&safe);
 
 	init_completion(&ipistorm_done);
 
