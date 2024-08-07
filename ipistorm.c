@@ -10,6 +10,7 @@
  */
 
 #define pr_fmt(fmt) "ipistorm: " fmt
+#define NUM_CPUS 8
 
 #include <linux/module.h>
 #include <linux/kthread.h>
@@ -48,8 +49,32 @@ static atomic_t running;
 
 static DECLARE_COMPLETION(ipistorm_done);
 
+static unsigned int sender[NUM_CPUS];
+static unsigned int receiver[NUM_CPUS];
+
+
 static void do_nothing_ipi(void *dummy)
 {
+	receiver[smp_processor_id()]++;
+}
+
+static void print_stats(void)
+{
+	pr_cont("DELTA for cpus(S - R): ");
+	for (int i = 0; i < NUM_CPUS; i++)
+		pr_cont( "CPU %d : %8d | ", i, sender[i] - receiver[i]);
+	pr_cont( "\n");
+}
+
+static int get_stats(void *data)
+{
+	pr_warn("Printing stats...\n");
+	while(!completion_done(&ipistorm_done)) {
+		print_stats();
+		ssleep(1);
+	}
+	print_stats();
+	return 0;
 }
 
 static int ipistorm_thread(void *data)
@@ -83,6 +108,7 @@ static int ipistorm_thread(void *data)
 	jiffies_start = jiffies;
 
 	while (jiffies < (jiffies_start + timeout*HZ)) {
+		sender[smp_processor_id()]++;
 		if (single)
 			smp_call_function_single(target_cpu,
 						 do_nothing_ipi, NULL, wait);
@@ -97,6 +123,7 @@ static int ipistorm_thread(void *data)
 
 	if (atomic_dec_and_test(&running))
 		complete(&ipistorm_done);
+	//print_stats();
 
 	return 0;
 }
@@ -126,8 +153,19 @@ static int __init ipistorm_init(void)
 		cpumask_copy(mask, cpu_online_mask);
 	}
 
+	// kthread for printing stats
+	struct task_struct *t;
+	t = kthread_create(get_stats, NULL, "my_timer");
+	if (IS_ERR(t)) {
+		pr_err("kthread_create failed\n");
+	} else {
+		wake_up_process(t);
+	}
+
+
 	num_cpus = cpumask_weight(mask);
 
+	// ipistorm threads
 	for_each_cpu(cpu, mask) {
 		struct task_struct *p;
 		p = kthread_create(ipistorm_thread, (void *)cpu,
@@ -141,6 +179,7 @@ static int __init ipistorm_init(void)
 		}
 	}
 
+
 out_free:
 	free_cpumask_var(mask);
 	return ret;
@@ -149,6 +188,7 @@ out_free:
 static void __exit ipistorm_exit(void)
 {
 	wait_for_completion(&ipistorm_done);
+	print_stats();
 }
 
 module_init(ipistorm_init)
